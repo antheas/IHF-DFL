@@ -2,6 +2,7 @@ from datetime import datetime
 from pathlib import Path
 from ml.visualization import visualize_simulation
 import json
+import os
 import multiprocessing as mp
 import re
 import sys
@@ -250,12 +251,20 @@ def run_one(config, run_id, path, author, startTime):
         return err_file
 
 
-def run_one_logged(config, run_id, path, author, startTime):
-    """Parallel worker: same as run_one, with this run's output sent to <path>.log instead of the shared terminal."""
+def run_one_logged(config, run_id, path, author, startTime, rpc_urls):
+    """Parallel worker: same as run_one, with this run's output sent to <path>.log instead of the shared terminal.
+    Borrows a node from rpc_urls for the duration of the run, so no two concurrent runs share a chain."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path.with_suffix(".log"), "w", buffering=1) as log:
-        sys.stdout = sys.stderr = log
-        return run_one(config, run_id, path, author, startTime)
+    rpc_url = rpc_urls.get()
+    try:
+        # require_env_var's load_dotenv does not override variables that are already set
+        os.environ["RPC_URL"] = rpc_url
+        with open(path.with_suffix(".log"), "w", buffering=1) as log:
+            sys.stdout = sys.stderr = log
+            print(f"Using node {rpc_url}")
+            return run_one(config, run_id, path, author, startTime)
+    finally:
+        rpc_urls.put(rpc_url)
 
 
 def main(author, parallel=1): # single preset
@@ -310,13 +319,25 @@ def run_parallel(todo, parallel, author, startTime, skipsCount, total):
     if any(not config.fork for config, _, _ in todo):
         raise SystemExit("--parallel only supports fork=True (local Ganache) runs.")
 
-    print(f"Running {len(todo)} experiments, {parallel} at a time. Per-run output goes to <result>.log")
+    # Runs on one node share its accounts (nonce collisions) and its clock (evm_increaseTime), so each
+    # concurrent run needs a node of its own.
+    urls = [u.strip() for u in os.environ.get("RPC_URLS", "").split(",") if u.strip()]
+    if len(urls) < parallel:
+        raise SystemExit(f"--parallel {parallel} needs {parallel} separate Ganache nodes: "
+                         f"set RPC_URLS=url1,url2,... (run_all.sh does this), got {len(urls)}.")
+
+    print(f"Running {len(todo)} experiments, {parallel} at a time on {', '.join(urls[:parallel])}. "
+          f"Per-run output goes to <result>.log")
     done = 0
     progress_bar(done, skipsCount, total)
     # spawn: no inherited torch/CUDA state; one task per child so every run starts from a clean process.
     ctx = mp.get_context("spawn")
-    with ProcessPoolExecutor(max_workers=parallel, mp_context=ctx, max_tasks_per_child=1) as pool:
-        futures = {pool.submit(run_one_logged, config, run_id, path, author, startTime): path
+    with ctx.Manager() as manager, \
+            ProcessPoolExecutor(max_workers=parallel, mp_context=ctx, max_tasks_per_child=1) as pool:
+        rpc_urls = manager.Queue()
+        for url in urls[:parallel]:
+            rpc_urls.put(url)
+        futures = {pool.submit(run_one_logged, config, run_id, path, author, startTime, rpc_urls): path
                    for config, run_id, path in todo}
         try:
             for future in as_completed(futures):
