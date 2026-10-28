@@ -15,7 +15,7 @@
 #   RUN_NAME    result subfolder name       (default: paper)
 #   PARALLEL    runs at the same time       (default: 1; CIFAR runs need a lot of GPU memory each)
 #   AUTHOR      author written to the CSVs  (default: $USER)
-#   RPC_PORT    Ganache port, must match RPC_URL in .env/.env.ganache (default: 7545)
+#   RPC_PORT    first Ganache port; PARALLEL=N uses N nodes on RPC_PORT..RPC_PORT+N-1 (default: 7545)
 #   FIG_DIR     where figures/summaries go  (default: data/figures/$RUN_NAME;
 #               use $PAPER_DIR/figures/results to overwrite the paper's figures)
 
@@ -41,9 +41,9 @@ EXPECTED_RUNS=480
 EXPERIMENTS=(
   "mnist_openfl_low_noise:mnist"
   "mnist_openfl_high_noise:mnist"
-  "cifar_openfl_low_noise:cifar.10"
-  "cifar_openfl_high_noise:cifar.10"
 )
+  # "cifar_openfl_low_noise:cifar.10"
+  # "cifar_openfl_high_noise:cifar.10"
 
 PLOT_ONLY=0
 case "${1:-}" in
@@ -59,44 +59,56 @@ log() { echo "[$(date '+%F %T')] $*"; }
 
 # ---------------- GANACHE ----------------
 
-GANACHE_PID=""
+# One node per parallel run: runs sharing a node collide on account nonces and on the chain clock.
+GANACHE_PIDS=()
+RPC_URLS=""
 
 rpc_up() {
   curl -s -m 2 -X POST -H 'Content-Type: application/json' \
     --data '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' \
-    "http://127.0.0.1:$RPC_PORT" >/dev/null 2>&1
+    "http://127.0.0.1:$1" >/dev/null 2>&1
 }
 
 start_ganache() {
-  if rpc_up; then
-    log "Using the node already listening on port $RPC_PORT"
-    return
-  fi
-  command -v ganache >/dev/null || { echo "ganache not found; install it (npm i -g ganache) or start a node on port $RPC_PORT" >&2; exit 1; }
+  command -v ganache >/dev/null || { echo "ganache not found; install it (npm i -g ganache)" >&2; exit 1; }
   mkdir -p "$RESULT_DIR"
-  log "Starting ganache on port $RPC_PORT (log: $RESULT_DIR/ganache.log)"
-  # Many accounts with large balances and a high gas limit (see README "Ganache"); shared by parallel runs.
-  ganache --server.port "$RPC_PORT" \
-    --wallet.totalAccounts 10 \
-    --wallet.defaultBalance 1000000 \
-    --miner.blockGasLimit 1000000000 \
-    --logging.quiet >>"$RESULT_DIR/ganache.log" 2>&1 &
-  GANACHE_PID=$!
-  for _ in $(seq 60); do
-    rpc_up && return
-    kill -0 "$GANACHE_PID" 2>/dev/null || break
-    sleep 1
+  local urls=() port pid
+  for ((i = 0; i < PARALLEL; i++)); do
+    port=$((RPC_PORT + i))
+    if rpc_up "$port"; then
+      echo "Port $port is already in use by another node; stop it or set RPC_PORT=..." >&2
+      exit 1
+    fi
+    # Many accounts with large balances and a high gas limit (see README "Ganache").
+    ganache --server.port "$port" \
+      --wallet.totalAccounts 10 \
+      --wallet.defaultBalance 1000000 \
+      --miner.blockGasLimit 1000000000 \
+      --logging.quiet >>"$RESULT_DIR/ganache-$port.log" 2>&1 &
+    GANACHE_PIDS+=($!)
+    urls+=("http://127.0.0.1:$port")
   done
-  echo "ganache did not come up, see $RESULT_DIR/ganache.log" >&2
-  exit 1
+  for ((i = 0; i < PARALLEL; i++)); do
+    port=$((RPC_PORT + i))
+    pid="${GANACHE_PIDS[$i]}"
+    for _ in $(seq 60); do
+      rpc_up "$port" && break
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 1
+    done
+    rpc_up "$port" || { echo "ganache did not come up, see $RESULT_DIR/ganache-$port.log" >&2; exit 1; }
+  done
+  RPC_URLS="$(IFS=,; echo "${urls[*]}")"
+  log "Started $PARALLEL ganache node(s): $RPC_URLS"
 }
 
 stop_ganache() {
-  if [[ -n "$GANACHE_PID" ]]; then
-    kill "$GANACHE_PID" 2>/dev/null || true
-    wait "$GANACHE_PID" 2>/dev/null || true
-    GANACHE_PID=""
-  fi
+  local pid
+  for pid in "${GANACHE_PIDS[@]}"; do
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
+  GANACHE_PIDS=()
 }
 trap stop_ganache EXIT
 
@@ -112,7 +124,8 @@ if [[ $PLOT_ONLY -eq 0 ]]; then
     # A fresh chain per preset keeps ganache's in-memory state from growing over all 480 runs.
     start_ganache
     log "Running preset $preset on $dataset -> $RESULT_DIR/$preset"
-    "$PYTHON" experiment/experiments.py \
+    # RPC_URL (sequential runs) and RPC_URLS (parallel runs) take precedence over .env/.env.ganache.
+    RPC_URL="${RPC_URLS%%,*}" RPC_URLS="$RPC_URLS" "$PYTHON" experiment/experiments.py \
       --preset "$preset" \
       --dataset "$dataset" \
       --outputName "$RUN_NAME/$preset" \
