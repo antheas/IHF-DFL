@@ -219,6 +219,8 @@ def skip_for(preset_name, config, run_id) -> "Skip":
 def run_one(config, run_id, path, author, startTime):
     """Run one config and write its .csv/.pkl (or an error-*.txt) to path's folder."""
     dataset = config.dataset
+    # Normalize before the writer thread logs the metadata; run_experiment does it too, but races the writer.
+    config.dataset = dataset.replace(".", "-")
     try:
         writer = AsyncWriter(path, OUTPUTHEADERS, WRITERBUFFERSIZE, config, author)
         metadata = {**vars(config), "dataset": dataset, "timestamp": startTime}
@@ -262,13 +264,18 @@ def main(author, parallel=1): # single preset
     if args.skipFolder is not None:
         parseSkips()
 
+    # A fixed output folder makes reruns resume: runs that already finished there are skipped.
+    if args.outputName is not None:
+        time = args.outputName
+        addSkipsFromDir(RESULTDATAFOLDER / time)
+    else:
+        time = datetime.now().strftime("%d-%m-%y--%H_%M_%S")
+
     run_configs = build_run_configs(preset, datasets)
     total = len(run_configs)
 
     skipConfigs = [skip_for(preset, config, run_id) for config, run_id in run_configs]
     skipsCount = sum(1 for sc in skipConfigs if shouldSkip(sc))
-
-    time = datetime.now().strftime("%d-%m-%y--%H_%M_%S")
 
     todo = []
     for (config, run_id), skipConfig in zip(run_configs, skipConfigs):
@@ -337,6 +344,12 @@ parser.add_argument("--skipFolder", type=str)
 parser.add_argument("--author", type=str)
 parser.add_argument("--parallel", type=int, default=1, metavar="N",
                     help="number of experiments to run at the same time (default: 1)")
+parser.add_argument("--preset", type=str, choices=[name for name in PRESETS if name != "default"],
+                    help=f"preset to run (default: {preset})")
+parser.add_argument("--dataset", type=str, action="append", choices=[DATASETFAST, DATASETSLOW],
+                    help="dataset to run, repeatable (default: " + ", ".join(datasets) + ")")
+parser.add_argument("--outputName", type=str,
+                    help="fixed result subfolder instead of a timestamp; runs already finished in it are skipped")
 # Lenient on import (e.g. pytest's argv); the script entry point below re-parses strictly.
 args, _ = parser.parse_known_args()
 
@@ -355,12 +368,16 @@ def parseSkips():
         False
     )
 
-    files: list[str] = []
-
     for dir in chosenDirs:
-        files.extend([p.name for p in dir.iterdir() if p.is_file() and p.suffix == ".pkl"])
+        addSkipsFromDir(dir)
 
-    for file in files:
+
+def addSkipsFromDir(dir: Path):
+    """Add a skip for every run that finished in dir (the .pkl is only saved on success)."""
+    if not dir.exists():
+        return
+
+    for file in [p.name for p in dir.iterdir() if p.is_file() and p.suffix == ".pkl"]:
         skip = skip_from_filename(file)
         if skip is None:
             print("Did not match:", file)
@@ -432,6 +449,10 @@ def progress_bar(i, skipsCount, total):
 if __name__ == "__main__":
     args = parser.parse_args()  # strict: fail on typos / unknown flags
     author = args.author if args.author is not None else input("Author?\n")
+    if args.preset is not None:
+        preset = args.preset
+    if args.dataset is not None:
+        datasets = args.dataset
     mp.freeze_support()
     if args.parallel < 1:
         parser.error("--parallel must be >= 1")
