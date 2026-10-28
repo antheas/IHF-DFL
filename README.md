@@ -70,6 +70,13 @@ The file experiments.py runs one such experiment and can be run with:
 Or if you want to specify a different .env file, run with the ENV prefix as described in the Environment Variables section:
 ``ENV=ganache python ./experiment/experiments.py``
 
+To run several experiments at the same time, pass ``--parallel N``:
+``python ./experiment/experiments.py --parallel 4``
+
+Each run gets its own process, and its console output goes to a ``.log`` file next to its ``.csv``.
+All runs share the same Ganache node and accounts (each deploys its own contracts), so make sure the
+account balances are large enough for N runs at once. Parallel mode only supports ``fork=True``.
+
 
 ## 5. Solidity testing
 - All forge commands must be run in the foundry directory.

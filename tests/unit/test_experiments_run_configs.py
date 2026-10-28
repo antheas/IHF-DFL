@@ -141,3 +141,10 @@ def test_main_runs_every_config_in_order(monkeypatch, tmp_path):
     assert [c["values"] for c in calls] == expected
     assert all(c["dataset"] == "mnist" and c["saved"].endswith(".pkl") for c in calls)
     assert calls[0]["name"] == "mnist_openfl_low_noise-mnist-loss_only-True-1-0.01-1-0.01-1"
+
+
+def test_parallel_refuses_real_net_runs(tmp_path):
+    config, run_id = experiments.build_run_configs("test", ["mnist"])[0]
+    config.fork = False
+    with pytest.raises(SystemExit):
+        experiments.run_parallel([(config, run_id, tmp_path / "x.csv")], 2, "tester", "now", 0, 1)

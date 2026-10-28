@@ -7,6 +7,7 @@ import re
 import sys
 import traceback
 import argparse
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 # Running this file directly puts experiment/ on sys.path.
 # Insert src/ and repo root before any project imports so they resolve
@@ -215,7 +216,47 @@ def skip_for(preset_name, config, run_id) -> "Skip":
     )
 
 
-def main(author): # single preset
+def run_one(config, run_id, path, author, startTime):
+    """Run one config and write its .csv/.pkl (or an error-*.txt) to path's folder."""
+    dataset = config.dataset
+    try:
+        writer = AsyncWriter(path, OUTPUTHEADERS, WRITERBUFFERSIZE, config, author)
+        metadata = {**vars(config), "dataset": dataset, "timestamp": startTime}
+        logger = ExperimentLogger(experiment_id=path.stem, metadata=metadata)
+        ExperimentRunner.run_experiment(dataset, config, run_id, writer, logger)
+        writer.finish()
+
+        logger.save(path.with_suffix(".pkl"))
+        return None
+    except Exception as e:
+
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        err_file = path.parent / f"error-{ts}.txt"
+
+        config_as_dict = config.__dict__
+
+        text = "CONFIG:\n"
+        text += json.dumps(config_as_dict, indent=4, default=str)
+        text += "\n\nEXCEPTION:\n"
+        text += "".join(traceback.format_exception(e))
+
+        err_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(err_file, "w") as f:
+            f.write(text)
+
+        print(f"Error logged to: {err_file}")
+        return err_file
+
+
+def run_one_logged(config, run_id, path, author, startTime):
+    """Parallel worker: same as run_one, with this run's output sent to <path>.log instead of the shared terminal."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path.with_suffix(".log"), "w", buffering=1) as log:
+        sys.stdout = sys.stderr = log
+        return run_one(config, run_id, path, author, startTime)
+
+
+def main(author, parallel=1): # single preset
     startTime = datetime.now().strftime("%d-%m-%y--%H_%M_%S")
 
     if args.skipFolder is not None:
@@ -229,9 +270,8 @@ def main(author): # single preset
 
     time = datetime.now().strftime("%d-%m-%y--%H_%M_%S")
 
-    done = 0
-    for i, ((config, run_id), skipConfig) in enumerate(zip(run_configs, skipConfigs), start=1):
-        dataset = config.dataset
+    todo = []
+    for (config, run_id), skipConfig in zip(run_configs, skipConfigs):
         if shouldSkip(skipConfig):
             print(f"Skipping: {skipConfig}")
             continue
@@ -242,40 +282,52 @@ def main(author): # single preset
                 if s.run_id == skipConfig.run_id and s.strategy == skipConfig.strategy:
                     print(f"  candidate: {s}")
 
+        path = getPath(config, time, config.dataset, preset, RESULTDATAFOLDER, run_id=run_id)
+        todo.append((config, run_id, path))
+
+    if parallel > 1:
+        run_parallel(todo, parallel, author, startTime, skipsCount, total)
+        return
+
+    for done, (config, run_id, path) in enumerate(todo):
         progress_bar(done, skipsCount, total)
-        done += 1
-
-        path = getPath(config, time, dataset, preset, RESULTDATAFOLDER, run_id=run_id)
-
-        try:
-
-            writer = AsyncWriter(path, OUTPUTHEADERS, WRITERBUFFERSIZE, config, author)
-            metadata = {**vars(config), "dataset": dataset, "timestamp": startTime}
-            logger = ExperimentLogger(experiment_id=path.stem, metadata=metadata)
-            ExperimentRunner.run_experiment(dataset, config, run_id, writer, logger)
-            writer.finish()
-
-            logger.save(path.with_suffix(".pkl"))
-        except Exception as e:
-
-            ts = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-            err_file = path.parent / f"error-{ts}.txt"
-
-            config_as_dict = config.__dict__
-
-            text = "CONFIG:\n"
-            text += json.dumps(config_as_dict, indent=4, default=str)
-            text += "\n\nEXCEPTION:\n"
-            text += "".join(traceback.format_exception(e))
-
-            with open(err_file, "w") as f:
-                f.write(text)
-
-            print(f"Error logged to: {err_file}")
+        run_one(config, run_id, path, author, startTime)
 
         # visualize_simulation(experiment.model, DATA_ROOT / "figures")
 
     #ExperimentRunner.print_transactions(experiment)
+
+
+def run_parallel(todo, parallel, author, startTime, skipsCount, total):
+    # Real-net runs sign with shared private keys and fetch nonces themselves, so concurrent runs would collide.
+    if any(not config.fork for config, _, _ in todo):
+        raise SystemExit("--parallel only supports fork=True (local Ganache) runs.")
+
+    print(f"Running {len(todo)} experiments, {parallel} at a time. Per-run output goes to <result>.log")
+    done = 0
+    progress_bar(done, skipsCount, total)
+    # spawn: no inherited torch/CUDA state; one task per child so every run starts from a clean process.
+    ctx = mp.get_context("spawn")
+    with ProcessPoolExecutor(max_workers=parallel, mp_context=ctx, max_tasks_per_child=1) as pool:
+        futures = {pool.submit(run_one_logged, config, run_id, path, author, startTime): path
+                   for config, run_id, path in todo}
+        try:
+            for future in as_completed(futures):
+                path = futures[future]
+                done += 1
+                try:
+                    err_file = future.result()
+                except Exception as e:  # worker died (e.g. OOM) before it could log the error itself
+                    err_file = None
+                    print(f"FAILED (worker crashed): {path.name}: {e!r}")
+                if err_file is not None:
+                    print(f"FAILED: {path.name} -> {err_file}")
+                else:
+                    print(f"Finished: {path.name}")
+                progress_bar(done, skipsCount, total)
+        except KeyboardInterrupt:
+            pool.shutdown(wait=False, cancel_futures=True)
+            raise
 
 
 # ---------------- ARGUMENTS ----------------
@@ -283,6 +335,8 @@ def main(author): # single preset
 parser = argparse.ArgumentParser()
 parser.add_argument("--skipFolder", type=str)
 parser.add_argument("--author", type=str)
+parser.add_argument("--parallel", type=int, default=1, metavar="N",
+                    help="number of experiments to run at the same time (default: 1)")
 # Lenient on import (e.g. pytest's argv); the script entry point below re-parses strictly.
 args, _ = parser.parse_known_args()
 
@@ -379,7 +433,9 @@ if __name__ == "__main__":
     args = parser.parse_args()  # strict: fail on typos / unknown flags
     author = args.author if args.author is not None else input("Author?\n")
     mp.freeze_support()
-    main(author)
+    if args.parallel < 1:
+        parser.error("--parallel must be >= 1")
+    main(author, args.parallel)
     print("Done :)")
 
 
