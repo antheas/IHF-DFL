@@ -1,6 +1,5 @@
 import logging
 import multiprocessing as mp
-import os
 from pathlib import Path
 import torch
 import torch.nn as nn
@@ -14,10 +13,10 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 USE_CUDA = (DEVICE.type == "cuda")
 PIN_MEMORY = USE_CUDA
 NON_BLOCKING = USE_CUDA
-NUM_WORKERS = min(4, os.cpu_count() // 2) if torch.cuda.is_available() else 0
-# The loaders built in data.py (one val loader per participant + the test loader) live for the whole run.
-# Persistent workers would keep every loader's workers (~700MB each) alive, growing a run to 10-20GB, so
-# workers are started per pass over the data and exit when it ends.
+# The loaders built in data.py (one val loader per participant + the test loader) are iterated many times per
+# round over small in-memory datasets: starting workers for each pass costs more CPU than it saves, and
+# persistent ones would keep ~700MB per worker alive for the whole run. Training builds its own loaders.
+NUM_WORKERS = 0
 PERSISTENT_WORKERS = False
 
 AMP = USE_CUDA  # Optional: mixed precision on CUDA
