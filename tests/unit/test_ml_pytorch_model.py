@@ -40,3 +40,37 @@ def test_get_color_handles_known_and_unknown_indices():
 def test_device_label_formats_output():
     assert training.device_label(torch.device("cpu")) == "CPU"
     assert training.device_label(torch.device("cuda"), 2) == "GPU 2"
+
+
+def test_training_model_compiles_only_once_per_process(monkeypatch):
+    created = []
+    compiled = []
+
+    class FakeModel:
+        def to(self, device):
+            self.device = device
+            return self
+
+    def make_model():
+        model = FakeModel()
+        created.append(model)
+        return model
+
+    def compile_model(model):
+        wrapper = object()
+        compiled.append((model, wrapper))
+        return wrapper
+
+    monkeypatch.setattr(training, "Net_CIFAR", make_model)
+    monkeypatch.setattr(training.torch, "compile", compile_model)
+    training._TRAINING_MODEL_CACHE.clear()
+
+    first = training._training_model("cifar", torch.device("cuda:0"))
+    second = training._training_model("cifar", torch.device("cuda:0"))
+
+    assert first is second
+    assert first == (created[0], compiled[0][1])
+    assert len(created) == 1
+    assert len(compiled) == 1
+
+    training._TRAINING_MODEL_CACHE.clear()

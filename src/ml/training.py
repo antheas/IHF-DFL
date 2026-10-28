@@ -10,6 +10,33 @@ from ml.cnn_models import Net_CIFAR, Net_MNIST
 from typing import Tuple
 
 
+# One experiment runs in one process, and training calls are sequential within
+# that process on a single GPU. Reuse the same model/compiled graph while
+# loading each participant's current weights before training. This avoids
+# invoking torch.compile for every participant in every federated round.
+_TRAINING_MODEL_CACHE = {}
+
+
+def _training_model(dataset: str, device: torch.device):
+    key = (dataset, str(device))
+    cached = _TRAINING_MODEL_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    model = Net_MNIST() if dataset == "mnist" else Net_CIFAR()
+    model.to(device)
+    training_model = model
+    if device.type == "cuda":
+        try:
+            training_model = torch.compile(model)
+        except Exception:
+            pass
+
+    cached = (model, training_model)
+    _TRAINING_MODEL_CACHE[key] = cached
+    return cached
+
+
 def device_label(device: torch.device, device_id: int = 0) -> str:
     if device.type == "cuda":
         return f"GPU {device_id}"
@@ -23,19 +50,6 @@ def train(
         epochs: int,
         device: torch.device,
 ) -> None: # tuple[float, float, float, int]
-    # Compile ONCE per process (not per batch).
-    # NOTE: mode="reduce-overhead" enables CUDA Graphs (cudagraph_trees), which
-    # preallocate static memory pools per graph. With multiple worker processes
-    # sharing a single GPU this caused CUBLAS_STATUS_ALLOC_FAILED. Default mode
-    # keeps the inductor speedup without the static allocation.
-    compile_start = time.perf_counter()
-    if device.type == "cuda":
-        try:
-            net = torch.compile(net)
-        except Exception:
-            pass
-    # compile_seconds = time.perf_counter() - compile_start
-
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.SGD(net.parameters(), lr=0.001, momentum=0.9)
 
@@ -127,16 +141,17 @@ def train_user_proc(user_id, model_state, train_ds, val_ds, epochs, device_id, d
     use_cuda = torch.cuda.is_available()
     device = torch.device(f"cuda:{device_id}" if use_cuda else "cpu")
 
-    # Recreate model based on dataset
+    # The base model and its torch.compile wrapper are cached once per
+    # experiment process/device. Participant state and optimizer state remain
+    # independent: weights are loaded here and the optimizer is rebuilt by
+    # train() for every call.
+    model, training_model = _training_model(dataset, device)
     if dataset == "mnist":
-        model = Net_MNIST()
         num_workers, persistent_workers = 0, False
     else: # CIFAR
-        model = Net_CIFAR()
         num_workers, persistent_workers = _loader_worker_options(use_cuda)
 
     model.load_state_dict(model_state)
-    model.to(device)
 
     # Rebuild dataloaders inside the process
     train_loader = DataLoader(train_ds, batch_size=batchsize, shuffle=True,
@@ -149,7 +164,7 @@ def train_user_proc(user_id, model_state, train_ds, val_ds, epochs, device_id, d
 
     # train_start = time.perf_counter()
     # train_compile, train_data_wait, train_compute, train_batches = train(model, train_loader, epochs, device)  # Line 285 in original code
-    train(model, train_loader, epochs, device)  # Line 285 in original code
+    train(training_model, train_loader, epochs, device)  # Line 285 in original code
     # train_seconds = time.perf_counter() - train_start
     # val_start = time.perf_counter()
     val_loss, val_acc = test(model, val_loader, device)  # Line 286 in original code
