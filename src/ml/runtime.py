@@ -1,4 +1,5 @@
 import logging
+import multiprocessing as mp
 import os
 from pathlib import Path
 import torch
@@ -14,7 +15,11 @@ USE_CUDA = (DEVICE.type == "cuda")
 PIN_MEMORY = USE_CUDA
 NON_BLOCKING = USE_CUDA
 NUM_WORKERS = min(4, os.cpu_count() // 2) if torch.cuda.is_available() else 0
-PERSISTENT_WORKERS = USE_CUDA and NUM_WORKERS > 0
+# The loaders built in data.py (one val loader per participant + the test loader) live for the whole run.
+# Persistent workers would keep every loader's workers (~700MB each) alive, growing a run to 10-20GB, so
+# workers are started per pass over the data and exit when it ends.
+PERSISTENT_WORKERS = False
+
 AMP = USE_CUDA  # Optional: mixed precision on CUDA
 DATASET_ROOT = repo_root(Path(__file__)) / "data" / "datasets"
 # cuDNN autotune for fixed-size inputs (both MNIST 28x28 and CIFAR-10 32x32)
@@ -31,6 +36,15 @@ def model_to_device(net: nn.Module) -> nn.Module:
     return net.to(DEVICE, non_blocking=NON_BLOCKING)
 
 
+def loader_mp_context(num_workers: int):
+    # Parallel experiment runs are spawned, which makes spawn their default too: every DataLoader worker would
+    # then re-import torch and get its own pickled copy of the dataset (a Subset pickles the whole parent
+    # dataset), ~700MB each. Forked workers share the parent's memory; they only build CPU tensors, never CUDA.
+    if num_workers > 0 and "fork" in mp.get_all_start_methods():
+        return "fork"
+    return None
+
+
 def cuda_safe_dataloader(ds, batch_size, shuffle=False):
     return DataLoader(
         ds,
@@ -39,6 +53,7 @@ def cuda_safe_dataloader(ds, batch_size, shuffle=False):
         pin_memory=PIN_MEMORY,
         num_workers=NUM_WORKERS,
         persistent_workers=PERSISTENT_WORKERS,
+        multiprocessing_context=loader_mp_context(NUM_WORKERS),
     )
 
 

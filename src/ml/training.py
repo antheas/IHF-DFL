@@ -5,7 +5,7 @@ import time
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from ml.runtime import NON_BLOCKING
+from ml.runtime import NON_BLOCKING, loader_mp_context
 from ml.cnn_models import Net_CIFAR, Net_MNIST
 from typing import Tuple
 
@@ -141,7 +141,8 @@ def train_user_proc(user_id, model_state, train_ds, val_ds, epochs, device_id, d
     # Rebuild dataloaders inside the process
     train_loader = DataLoader(train_ds, batch_size=batchsize, shuffle=True,
                             pin_memory=pin_memory, num_workers=num_workers,
-                            persistent_workers=persistent_workers, prefetch_factor=4 if num_workers > 0 else None)
+                            persistent_workers=persistent_workers, prefetch_factor=4 if num_workers > 0 else None,
+                            multiprocessing_context=loader_mp_context(num_workers))
     val_loader = DataLoader(val_ds, batch_size=batchsize, shuffle=False,
                             pin_memory=pin_memory, num_workers=0,
                             persistent_workers=False)

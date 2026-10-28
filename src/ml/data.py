@@ -2,7 +2,7 @@ import torch
 from torch.utils.data import DataLoader, random_split, Subset
 from torchvision import transforms
 from torchvision.datasets import CIFAR10, MNIST
-from ml.runtime import PIN_MEMORY, NUM_WORKERS, PERSISTENT_WORKERS, DATASET_ROOT
+from ml.runtime import PIN_MEMORY, NUM_WORKERS, PERSISTENT_WORKERS, DATASET_ROOT, loader_mp_context
 import data.seeds as seeds
 
 
@@ -68,6 +68,7 @@ def load_data(pm, _print=False):
             pin_memory=PIN_MEMORY,
             num_workers=NUM_WORKERS,
             persistent_workers=PERSISTENT_WORKERS,
+            multiprocessing_context=loader_mp_context(NUM_WORKERS),
         ))
         valloaders.append(DataLoader(
             ds_val,
@@ -76,6 +77,7 @@ def load_data(pm, _print=False):
             pin_memory=PIN_MEMORY,
             num_workers=NUM_WORKERS,
             persistent_workers=PERSISTENT_WORKERS,
+            multiprocessing_context=loader_mp_context(NUM_WORKERS),
         ))
     testloader = DataLoader(
         testset,
@@ -84,6 +86,7 @@ def load_data(pm, _print=False):
         pin_memory=PIN_MEMORY,
         num_workers=NUM_WORKERS,
         persistent_workers=PERSISTENT_WORKERS,
+        multiprocessing_context=loader_mp_context(NUM_WORKERS),
     )
     pm.DATA = (trainloaders, valloaders, testloader)
     return trainloaders, valloaders, testloader
