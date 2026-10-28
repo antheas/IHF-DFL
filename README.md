@@ -37,7 +37,9 @@ sudo apt install python3 python3-venv nodejs npm curl
 
 `run_all.sh` creates `.venv` with the local `python3` and installs the runtime
 dependencies automatically. It also installs the pinned Ganache and Solidity command-line
-tools locally under `node_modules`. To prepare everything without starting the experiments:
+tools locally under `node_modules`. Before launching parallel workers, it downloads each
+selected dataset once to avoid concurrent writes to the same archive. To prepare the
+software environment without starting the experiments:
 
 ```bash
 ./run_all.sh --setup-only

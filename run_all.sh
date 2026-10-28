@@ -150,6 +150,19 @@ trap stop_ganache EXIT
 
 # ---------------- EXPERIMENTS ----------------
 
+DATASETS=()
+for entry in "${EXPERIMENTS[@]}"; do
+  dataset="${entry##*:}"
+  if [[ ! " ${DATASETS[*]} " =~ " $dataset " ]]; then
+    DATASETS+=("$dataset")
+  fi
+done
+
+# torchvision's download path is not safe for several processes writing the
+# same archive. Download and verify every selected dataset before workers spawn.
+log "Preparing datasets: ${DATASETS[*]}"
+"$PYTHON" scripts/download_datasets.py "${DATASETS[@]}"
+
 log "Compiling contracts"
 "$PYTHON" scripts/compile_contracts.py
 
