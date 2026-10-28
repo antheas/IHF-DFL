@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runs every experiment behind the FAIRFL paper's result figures (../polfl) and regenerates the plots.
+# Runs every experiment behind the FAIRFL paper's result figures and collects the completed CSVs.
 #
 # Grid (paper Tables "static parameters" / "hyperparameter grid"):
 #   {naive, loss_only, accuracy_only, accuracy_loss} x free-rider noise {0.01, 0.1}
@@ -8,54 +8,90 @@
 #
 # Re-running resumes: runs that already finished (have a .pkl) in the result folder are skipped.
 #
-# Usage: ./run_all.sh [--plot-only]
+# Usage: ./run_all.sh [--setup-only]
 # Environment overrides:
-#   PYTHON      python interpreter          (default: .venv/bin/python)
-#   PAPER_DIR   paper repository            (default: ../polfl)
+#   PYTHON      interpreter used to create the venv (default: python3)
+#   VENV_DIR    virtual environment path    (default: .venv)
+#   GANACHE     Ganache executable           (default: node_modules/.bin/ganache)
 #   RUN_NAME    result subfolder name       (default: paper)
 #   PARALLEL    runs at the same time       (default: 1; CIFAR runs need a lot of GPU memory each)
 #   AUTHOR      author written to the CSVs  (default: $USER)
 #   RPC_PORT    first Ganache port; PARALLEL=N uses N nodes on RPC_PORT..RPC_PORT+N-1 (default: 7545)
-#   FIG_DIR     where figures/summaries go  (default: data/figures/$RUN_NAME;
-#               use $PAPER_DIR/figures/results to overwrite the paper's figures)
 
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_ROOT"
 
-PYTHON="${PYTHON:-$REPO_ROOT/.venv/bin/python}"
-PAPER_DIR="${PAPER_DIR:-$REPO_ROOT/../polfl}"
+BOOTSTRAP_PYTHON="${PYTHON:-python3}"
+VENV_DIR="${VENV_DIR:-$REPO_ROOT/.venv}"
+GANACHE="${GANACHE:-$REPO_ROOT/node_modules/.bin/ganache}"
 RUN_NAME="${RUN_NAME:-paper}"
 PARALLEL="${PARALLEL:-1}"
 AUTHOR="${AUTHOR:-${USER:-unknown}}"
 RPC_PORT="${RPC_PORT:-7545}"
-FIG_DIR="${FIG_DIR:-$REPO_ROOT/data/figures/$RUN_NAME}"
 
 RESULT_DIR="$REPO_ROOT/data/runs/experiments/$RUN_NAME"
 CSV_DIR="$REPO_ROOT/data/runs/paper_csv/$RUN_NAME"
-PLOT_SCRIPT="$PAPER_DIR/analysis/plot_results.py"
 EXPECTED_RUNS=480
 
 # preset:dataset (dataset names as experiment/experiments.py expects them)
 EXPERIMENTS=(
-  "mnist_openfl_low_noise:mnist"
-  "mnist_openfl_high_noise:mnist"
+  "cifar_openfl_low_noise:cifar.10"
+  "cifar_openfl_high_noise:cifar.10"
 )
-  # "cifar_openfl_low_noise:cifar.10"
-  # "cifar_openfl_high_noise:cifar.10"
+  # "mnist_openfl_low_noise:mnist"
+  # "mnist_openfl_high_noise:mnist"
 
-PLOT_ONLY=0
+SETUP_ONLY=0
 case "${1:-}" in
   "") ;;
-  --plot-only) PLOT_ONLY=1 ;;
-  *) echo "Usage: $0 [--plot-only]" >&2; exit 2 ;;
+  --setup-only) SETUP_ONLY=1 ;;
+  *) echo "Usage: $0 [--setup-only]" >&2; exit 2 ;;
 esac
 
 log() { echo "[$(date '+%F %T')] $*"; }
 
-[[ -x "$PYTHON" ]] || { echo "Python not found at $PYTHON (set PYTHON=...)" >&2; exit 1; }
-[[ -f "$PLOT_SCRIPT" ]] || { echo "Plot script not found at $PLOT_SCRIPT (set PAPER_DIR=...)" >&2; exit 1; }
+setup_python() {
+  if [[ ! -x "$VENV_DIR/bin/python" ]]; then
+    command -v "$BOOTSTRAP_PYTHON" >/dev/null || {
+      echo "Python interpreter '$BOOTSTRAP_PYTHON' was not found (set PYTHON=...)" >&2
+      exit 1
+    }
+    log "Creating virtual environment at $VENV_DIR with $BOOTSTRAP_PYTHON"
+    "$BOOTSTRAP_PYTHON" -m venv "$VENV_DIR" || {
+      echo "Could not create the venv. On Ubuntu, install python3-venv." >&2
+      exit 1
+    }
+  fi
+
+  PYTHON="$VENV_DIR/bin/python"
+  if ! "$PYTHON" -c 'import torch, torchvision, numpy, web3, termcolor, matplotlib, eth_abi, pandas, solcx, dotenv, psutil, jsonpickle, yaml' >/dev/null 2>&1; then
+    log "Installing project dependencies into $VENV_DIR"
+    "$PYTHON" -m pip install -e "$REPO_ROOT"
+  fi
+  log "Using $($PYTHON --version) from $PYTHON"
+}
+
+setup_python
+
+setup_node_tools() {
+  if [[ ! -x "$GANACHE" || ! -x "$REPO_ROOT/node_modules/.bin/solcjs" ]]; then
+    command -v npm >/dev/null || {
+      echo "npm was not found. On Ubuntu, install nodejs and npm." >&2
+      exit 1
+    }
+    log "Installing pinned Ganache and Solidity compiler into node_modules"
+    npm install --no-audit --no-fund
+  fi
+}
+
+setup_node_tools
+
+if [[ $SETUP_ONLY -eq 1 ]]; then
+  log "Python environment and Node tools are ready"
+  exit 0
+fi
 
 # ---------------- GANACHE ----------------
 
@@ -70,7 +106,7 @@ rpc_up() {
 }
 
 start_ganache() {
-  command -v ganache >/dev/null || { echo "ganache not found; install it (npm i -g ganache)" >&2; exit 1; }
+  [[ -x "$GANACHE" ]] || { echo "ganache not found at $GANACHE (set GANACHE=...)" >&2; exit 1; }
   mkdir -p "$RESULT_DIR"
   local urls=() port pid
   for ((i = 0; i < PARALLEL; i++)); do
@@ -80,7 +116,7 @@ start_ganache() {
       exit 1
     fi
     # Many accounts with large balances and a high gas limit (see README "Ganache").
-    ganache --server.port "$port" \
+    "$GANACHE" --server.port "$port" \
       --wallet.totalAccounts 10 \
       --wallet.defaultBalance 1000000 \
       --miner.blockGasLimit 1000000000 \
@@ -114,26 +150,24 @@ trap stop_ganache EXIT
 
 # ---------------- EXPERIMENTS ----------------
 
-if [[ $PLOT_ONLY -eq 0 ]]; then
-  log "Compiling contracts"
-  "$PYTHON" scripts/compile_contracts.py
+log "Compiling contracts"
+"$PYTHON" scripts/compile_contracts.py
 
-  for entry in "${EXPERIMENTS[@]}"; do
-    preset="${entry%%:*}"
-    dataset="${entry##*:}"
-    # A fresh chain per preset keeps ganache's in-memory state from growing over all 480 runs.
-    start_ganache
-    log "Running preset $preset on $dataset -> $RESULT_DIR/$preset"
-    # RPC_URL (sequential runs) and RPC_URLS (parallel runs) take precedence over .env/.env.ganache.
-    RPC_URL="${RPC_URLS%%,*}" RPC_URLS="$RPC_URLS" "$PYTHON" experiment/experiments.py \
-      --preset "$preset" \
-      --dataset "$dataset" \
-      --outputName "$RUN_NAME/$preset" \
-      --author "$AUTHOR" \
-      --parallel "$PARALLEL"
-    stop_ganache
-  done
-fi
+for entry in "${EXPERIMENTS[@]}"; do
+  preset="${entry%%:*}"
+  dataset="${entry##*:}"
+  # A fresh chain per preset keeps ganache's in-memory state from growing over all 480 runs.
+  start_ganache
+  log "Running preset $preset on $dataset -> $RESULT_DIR/$preset"
+  # RPC_URL (sequential runs) and RPC_URLS (parallel runs) take precedence over .env/.env.ganache.
+  RPC_URL="${RPC_URLS%%,*}" RPC_URLS="$RPC_URLS" "$PYTHON" experiment/experiments.py \
+    --preset "$preset" \
+    --dataset "$dataset" \
+    --outputName "$RUN_NAME/$preset" \
+    --author "$AUTHOR" \
+    --parallel "$PARALLEL"
+  stop_ganache
+done
 
 # ---------------- COLLECT ----------------
 
@@ -158,8 +192,4 @@ if [[ $found -ne $EXPECTED_RUNS ]]; then
   exit 1
 fi
 
-# ---------------- PLOT ----------------
-
-log "Generating figures into $FIG_DIR"
-"$PYTHON" "$PLOT_SCRIPT" --input "$CSV_DIR" --output "$FIG_DIR"
-log "Done"
+log "Done; collected CSVs are in $CSV_DIR"

@@ -27,26 +27,44 @@ PRIVATE_KEYS="<Private keys from your accounts colon separated (for non-locally 
 ```
 
 ## 3. Requirements
-- Only tested with Python3.10
-Create a virtual environment and activate it.
-- Run ``python3 -m venv .venv``
-- Then Run ``source .venv/bin/activate``
 
-Install requirements:
-Only tested with Python3.10
-- Run ``pip install -e ".[dev]"``
+Python 3.10 or newer is supported. On Ubuntu, install the system tools with:
+
+```bash
+sudo apt update
+sudo apt install python3 python3-venv nodejs npm curl
+```
+
+`run_all.sh` creates `.venv` with the local `python3` and installs the runtime
+dependencies automatically. It also installs the pinned Ganache and Solidity command-line
+tools locally under `node_modules`. To prepare everything without starting the experiments:
+
+```bash
+./run_all.sh --setup-only
+```
+
+Set `PYTHON=/path/to/python` on the first run to use another local interpreter, or
+set `VENV_DIR=/path/to/venv` to put the environment elsewhere. The script always
+runs through the venv, so it does not need to be activated.
+
+For development tools, activate the environment and install the optional dependencies:
+
+```bash
+source .venv/bin/activate
+python -m pip install -e ".[dev]"
+```
 
 Build the abi and bytecode files from the smart contracts
-``python3 scripts/compile_contracts.py``
+``.venv/bin/python scripts/compile_contracts.py``
 
 Strip notebook outputs before committing (run once per clone):
 ``nbstripout --install``
 
 Install ROCM(AMD) or CUDA(NVIDIA):
 ROCM:
-``pip3 install torch torchvision --index-url https://download.pytorch.org/whl/rocm7.1``
+``.venv/bin/python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm7.1``
 CUDA:
-``pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cu130``
+``.venv/bin/python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130``
 
 
 ## 4. Running an Experiment
@@ -127,6 +145,6 @@ To get test coverage for solidity code, run the following command: \
 
 
 # 8. Solidity Compiler (Arm)
-If running on arm cpu, you need to download a recompiled solidity (solc) compiler for arm 
-and place it in the directory ```~/.local/bin/solc```
-The files can be found here: https://github.com/0xidm/solc-bin
+
+On ARM Linux, `run_all.sh` uses the architecture-independent Solidity 0.8.9
+compiler installed from npm. No separate native `solc` download is required.

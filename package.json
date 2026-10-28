@@ -1,0 +1,9 @@
+{
+  "name": "ihp-dfl-tools",
+  "private": true,
+  "description": "Pinned command-line tools used by run_all.sh",
+  "dependencies": {
+    "ganache": "7.9.2",
+    "solc": "0.8.9"
+  }
+}

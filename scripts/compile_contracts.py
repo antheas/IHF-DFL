@@ -1,5 +1,6 @@
 import os
 import platform
+import subprocess
 from solcx import install_solc, set_solc_version, compile_standard, get_installed_solc_versions
 from pathlib import Path
 import json
@@ -9,20 +10,23 @@ print(get_installed_solc_versions())
 
 SOLC_VERSION = "0.8.9"
 IS_ARM = platform.machine() in ("aarch64", "arm64")
+root = repo_root(Path(__file__))
 
 compile_kwargs = {}
 if IS_ARM:
-    # solcx has no prebuilt ARM binary; use a system-installed solc.
-    # Override via SOLC_BINARY env var if installed outside ~/.local/bin.
-    compile_kwargs["solc_binary"] = os.environ.get(
-        "SOLC_BINARY", str(Path.home() / ".local/bin/solc")
-    )
-else:
+    # py-solc-x has no native ARM release for this old compiler. A caller may
+    # still provide a native binary, otherwise we use the pinned npm module.
+    solc_binary = os.environ.get("SOLC_BINARY")
+    if solc_binary:
+        compile_kwargs["solc_binary"] = solc_binary
+
+use_solc_js = IS_ARM and not compile_kwargs and (root / "node_modules" / "solc").is_dir()
+
+if not compile_kwargs and not use_solc_js:
     install_solc(SOLC_VERSION)
     set_solc_version(SOLC_VERSION)
 
 # 2) Load sources
-root = repo_root(Path(__file__))
 contracts_dir = root / "contracts"
 harnesses_contracts_dir = root / "contracts" / "harnesses"
 sources = {
@@ -33,14 +37,29 @@ sources = {
 }
 
 # 3) Compile
-compiled = compile_standard({
+compiler_input = {
     "language": "Solidity",
     "sources": sources,
     "settings": {
         "optimizer": {"enabled": True, "runs": 200},
         "outputSelection": {"*": {"*": ["abi","evm.bytecode.object"]}}
     }
-}, **compile_kwargs)
+}
+
+if use_solc_js:
+    result = subprocess.run(
+        ["node", str(root / "scripts" / "compile_solidity.js")],
+        input=json.dumps(compiler_input),
+        text=True,
+        capture_output=True,
+        cwd=root,
+        check=False,
+    )
+    if result.returncode:
+        raise RuntimeError(f"solcjs failed:\n{result.stderr}")
+    compiled = json.loads(result.stdout)
+else:
+    compiled = compile_standard(compiler_input, **compile_kwargs)
 
 bytecode = compiled["contracts"]["OpenFLModel.sol"]["OpenFLModel"]["evm"]["bytecode"]["object"]
 
